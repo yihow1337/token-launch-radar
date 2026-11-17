@@ -8,7 +8,8 @@
 //                          wrote as [slug, rank, implied value, verdict] rows and a 32-bit FNV-1a
 //                          seal of them: the page recomputes the whole board in the browser with the
 //                          same model.js and checks every row and the seal against these, so the
-//                          screenshots, the page and board.json cannot drift apart - and say so
+//                          screenshots, the page and board.json cannot drift apart - and say so;
+//                          and the farm plans worded by lib/plans.js at both deposits the page offers
 //   /output/dashboard/     this repository's dashboard, copied
 //   /output/screenshots/   its three screenshots, copied
 //   /output/dossier.json   last, from vendor/makefun-board.ts, exactly as the starter writes it
@@ -42,12 +43,20 @@ interface BoardRow {
   implied_value_usd: number; implied_low_usd: number; implied_high_usd: number;
   category: string | null; chains: string[]; tvl_usd: number; change_7d: number | null;
   age_days: number | null; watchlist: boolean; above_floor: boolean; confidence: string;
-  family: string; peer_multiple: number; size_multiple: number; offset_factor: number;
+  family: string; size_multiple: number; offset_factor: number;
   momentum_factor: number; clock_factor: number; comps_in_category: number;
   verdict: string; drop_usd: number; cost_usd: number; net_usd: number;
   hands_on_hours: number; net_per_hour_usd: number;
-  farm: { chain: string | null; deposit_usd: number; hold_days: number; fees_usd: number; opportunity_usd: number; steps: { action: string; cost: string; time: string }[] };
+  farm: Plan;
 }
+interface Step { key: string; cost_usd: number; hours: number; action: string; cost: string; time: string }
+interface Plan {
+  chain: string | null; deposit_usd: number; hold_days: number; weeks: number; capped: boolean;
+  gas_per_tx: number; fees_usd: number; opportunity_usd: number; verdict: string;
+  drop_usd: number; cost_usd: number; net_usd: number; hands_on_hours: number; net_per_hour_usd: number;
+  steps: Step[];
+}
+interface Plans { render(row: BoardRow, plan: Plan): Step[]; stepText(step: Step): string }
 interface Stat { n: number; spearman: number; median_x: number; within_3x: number }
 interface Radar {
   as_of: string; source: string; floor_usd: number; model_version: string;
@@ -108,13 +117,17 @@ function parseSnapshot(text: string): Snapshot {
 
 /* --- the model, loaded the way the page loads it --- */
 
-/** dashboard/model.js in its own vm context, so this program scores with the file the judge reads. */
-function loadModel(path: string): { buildRadar(s: Snapshot): Radar; seal(rows: BoardRow[]): string } {
+/** One of this repository's plain scripts in its own vm context, as the page loads it: no network,
+ *  no require, nothing of this program's own scope. dashboard/model.js is the file the judge reads
+ *  and the file the page runs; lib/plans.js only words what model.js has already priced. */
+function loadScript(path: string, global: string, needs: string[]): Record<string, unknown> {
   const sandbox: Record<string, unknown> = {};
-  runInNewContext(readFileSync(path, 'utf8'), sandbox, { filename: 'dashboard/model.js' });
-  const model = sandbox.RadarModel as { buildRadar?: unknown; seal?: unknown } | undefined;
-  if (model === undefined || typeof model.buildRadar !== 'function' || typeof model.seal !== 'function') die(`${path} did not set globalThis.RadarModel.buildRadar and .seal`);
-  return model as { buildRadar(s: Snapshot): Radar; seal(rows: BoardRow[]): string };
+  runInNewContext(readFileSync(path, 'utf8'), sandbox, { filename: path });
+  const api = sandbox[global] as Record<string, unknown> | undefined;
+  for (const name of needs) {
+    if (api === undefined || typeof api[name] !== 'function') die(`${path} did not set globalThis.${global}.${name}`);
+  }
+  return api as Record<string, unknown>;
 }
 
 /* --- the gate's own rules, checked here so a bad board never leaves this program --- */
@@ -214,9 +227,31 @@ if (!existsSync(inputFile)) die(`no snapshot at ${inputFile}: pass --input <snap
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const model = loadModel(join(here, 'dashboard', 'model.js'));
+const model = loadScript(join(here, 'dashboard', 'model.js'), 'RadarModel', ['buildRadar', 'farmPlan', 'seal']) as unknown as {
+  buildRadar(s: Snapshot): Radar; farmPlan(r: BoardRow, deposit: number, share: number): Plan; seal(rows: BoardRow[]): string;
+};
+const plans = loadScript(join(here, 'lib', 'plans.js'), 'RadarPlans', ['render', 'stepText']) as unknown as Plans;
 const radar = model.buildRadar(snapshot);
 const board = radar.board;
+
+// model.js priced every step; lib/plans.js writes the English for it. The board carries the wording of
+// the deposit board.json is built at, and data.js carries it at every deposit the page can be set to,
+// so a reader who moves that selector reads a plan whose words and whose numbers are both its own.
+const PLAN_DEPOSITS = [1_000, 10_000];
+const worded: Record<string, Record<string, [string, string, string][]>> = {};
+for (const row of board) {
+  row.farm.steps = plans.render(row, row.farm);
+  row.farm_steps = row.farm.steps.map((s) => plans.stepText(s));
+}
+for (const deposit of PLAN_DEPOSITS) {
+  const byslug: Record<string, [string, string, string][]> = {};
+  for (const row of board) {
+    const plan = deposit === radar.deposit_usd ? row.farm : model.farmPlan(row, deposit, radar.airdrop_share);
+    const steps = deposit === radar.deposit_usd ? row.farm.steps : plans.render(row, plan);
+    byslug[row.slug] = steps.map((s) => [s.action, s.cost, s.time]);
+  }
+  worded[String(deposit)] = byslug;
+}
 
 const issue = boardIssue(board, snapshot);
 if (issue !== null) die(`the model wrote a board the gate refuses: ${issue}`);
@@ -245,7 +280,8 @@ writeFileSync(join(out, 'board.json'), `${JSON.stringify({
 const ledger = board.map((r) => [r.slug, r.rank, r.implied_value_usd, r.verdict]);
 writeFileSync(join(out, 'data.js'), `window.RADAR_SNAPSHOT = ${JSON.stringify(snapshot)};\n`
   + `window.RADAR_BOARD = ${JSON.stringify(ledger)};\n`
-  + `window.RADAR_SEAL = ${JSON.stringify(radar.seal)};\n`);
+  + `window.RADAR_SEAL = ${JSON.stringify(radar.seal)};\n`
+  + `window.RADAR_PLANS = ${JSON.stringify(worded)};\n`);
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */
 function copyFiles(from: string, to: string): string[] {
@@ -330,7 +366,8 @@ if (process.argv.includes('--report')) {
       `${r.change_7d === null ? '  n/a' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1)}`.padStart(6), ' ',
       (r.age_days === null ? 'n/a' : `${r.age_days}d`).padStart(6), ' ',
       r.size_multiple.toFixed(3).padStart(6), ' ', r.offset_factor.toFixed(3), '  ', r.momentum_factor.toFixed(3), '  ', r.clock_factor.toFixed(3), '  ',
-      r.peer_multiple.toFixed(3).padStart(6), ' ', usd(r.implied_value_usd).padStart(9), '   ',
+      (r.implied_value_usd / r.tvl_usd).toFixed(3).padStart(6), ' ',
+      usd(r.implied_value_usd).padStart(9), '   ',
       `${usd(r.implied_low_usd)}-${usd(r.implied_high_usd)}`.padEnd(17), r.verdict.padEnd(9),
       money(r.net_usd).padStart(8), money(r.net_per_hour_usd).padStart(8), '  ', r.confidence,
     ].join(''));

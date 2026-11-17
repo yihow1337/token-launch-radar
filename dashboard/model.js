@@ -1,33 +1,31 @@
 /* Token Launch Radar - the value model.   radar-curve-2
  *
- * One DefiLlama snapshot in; the protocols that record no token out, ranked by an implied value,
- * each with a rank range, a farm plan priced step by step, and a verdict that nets the airdrop it
- * expects against what that farm costs.
+ * One DefiLlama snapshot in; the protocols that record no token out, ranked by an implied value, each
+ * with a rank range, a farm plan priced step by step, and a verdict that nets the airdrop it expects
+ * against what that farm costs.
  *
  *     log10 V = a + b × log10(TVL / $100M) + family/category offset + momentum + no-token clock
  *
- * Every term is fitted on the snapshot's own clean comps and measured out of sample here, and the
- * page prints what this file computed: fitCurve() the Huber curve (b < 1, so the multiple falls as
- * TVL rises), fitAll() the offsets (shrunk with k = 8; a category needs 3 comps of its own before
- * it may price itself), fitClock() the share of protocols of each age that still record no token,
- * ablation() every term in turn against leave-one-out and a split in time, bootstrapRanks() the
- * rank range over 40 refits on resampled comps, farmPlan() the costed plan and its verdict.
+ * Every term is fitted on the snapshot's own clean comps and measured out of sample here: fitCurve()
+ * the Huber curve (b < 1, so the multiple falls as TVL rises), fitAll() the offsets (shrunk with
+ * k = 8; a category needs 3 comps of its own before it may price itself), fitClock() the share of
+ * protocols of each age that still record no token, ablation() every term against leave-one-out and a
+ * split in time, bootstrapRanks() the rank range over 40 refits, farmPlan() the costed plan.
  *
- * No protocol is named here: the rules read category strings, chain names, TVL, the 7-day change
- * and the listing date. "Records no token" is the snapshot's own wording and all it means - no
- * CoinGecko id, no ticker, no market cap. Not a promise of a token, and none of it is advice.
- * main.ts runs this file in node:vm to write board.json; the page runs it as a plain script and
- * checks its board against the seal main.ts wrote. No network, no clock, no randomness: same bytes
- * in, same bytes out.
+ * No protocol is named here: the rules read category strings, chain names, TVL, the 7-day change and
+ * the listing date. "Records no token" is the snapshot's own wording and all it means - no id, no
+ * ticker, no market cap. Not a promise of a token, and none of it is advice. main.ts runs this file in
+ * node:vm to write board.json; the page runs it and checks its board against the seal main.ts wrote.
+ * No network, no clock, no randomness: same bytes in, same bytes out.
  */
 (function (root) {
 'use strict';
 
-/* Every constant the model has, printed in the Model tab as it stands. A bucket needs ~8 comps of
-   its own to outweigh its parent (shrink_k) and 3 before it prices itself (min_cat_comps); none may
-   move a value over 0.6 dex. The farm side assumes 7.5% of implied value goes to a community
-   airdrop by deposit share, on a $1,000 deposit never over 0.01% of TVL, against the 4.5% it would
-   have earned in T-bills; FARM wants the drop to cover its costs twice over. */
+/* Every constant the model has, printed in the Model tab as it stands. A bucket needs ~8 comps of its
+   own to outweigh its parent (shrink_k) and 3 before it prices itself (min_cat_comps); none may move a
+   value over 0.6 dex. The farm side assumes 7.5% of implied value goes to a community airdrop by
+   deposit share, on a $1,000 deposit never over 0.01% of TVL, against the 4.5% it would have earned in
+   T-bills; FARM wants the drop to cover its costs twice over. */
 var C = {
   version: 'radar-curve-2',
   pivot_usd: 1e8, huber_c: 1.345, irls_steps: 12,
@@ -99,8 +97,8 @@ function seal(rows) {
 function isPreToken(p) { return p.gecko_id === null && p.symbol === null; }
 function isLive(p) { return !isPreToken(p) && typeof p.mcap_usd === 'number' && p.mcap_usd > 0 && p.tvl_usd > 0; }
 
-// A wrapper, a bridge or a versioned pool of a token that already trades is not a launch of its
-// own: set aside with its reason rather than ranked, and never used as a comp.
+// A wrapper, a bridge or a versioned pool of a token that already trades is not a launch of its own:
+// set aside with its reason rather than ranked, and never used as a comp.
 var ASIDE_CATEGORIES = {
   'Bridge': 'bridges another chain’s asset', 'Canonical Bridge': 'a chain’s canonical bridge',
   'Cross Chain Bridge': 'a cross-chain bridge', 'Liquid Staking': 'a staking wrapper',
@@ -295,11 +293,6 @@ var GAS = [
 var GAS_OF = {}, GAS_DEFAULT = { lo: 0.05, hi: 0.50 };
 GAS.forEach(function (g) { g.chains.split('|').forEach(function (c) { GAS_OF[c] = g; }); });
 
-function money(x) { return x >= 100 ? '$' + Math.round(x).toLocaleString('en-US') : '$' + (x > 0 && x < 0.01 ? 0.01 : x).toFixed(2); }
-function bigUsd(x) { return x >= 1e9 ? '$' + round(x / 1e9, 2) + 'B' : '$' + Math.round(x / 1e6) + 'M'; }
-function hours(h) { return h < 1 ? Math.round(h * 60) + ' min' : round(h, 1) + ' h'; }
-function weekly(h, w) { return Math.round(h * 60 / w) + ' min a week for ' + w + ' weeks'; }
-
 function pickChain(chains) {
   var best = null, g = GAS_DEFAULT, i, c;
   for (i = 0; i < (chains || []).length; i++) {
@@ -309,60 +302,59 @@ function pickChain(chains) {
   return { chain: best, tx: (g.lo + g.hi) / 2 };
 }
 
-function on(chain) { return chain ? ' on ' + chain : ''; }
 function holdFor(age) { return age === null ? 60 : age < 180 ? 90 : age < 365 ? 75 : age < 730 ? 60 : 45; }
 
-/** The two steps that make the position, by family. usd is gas and fees, hr is hours. */
-function actionsFor(r, chain, dep, tx, hold) {
-  var cat = r.category, d = money(dep), nm = r.name, at = on(chain), wk = Math.round(hold / 7);
+/** The two steps that make the position, by family: what each costs in gas and fees and in hours,
+    and the key of the sentence lib/plans.js writes for it. */
+function actionsFor(r, dep, tx, hold, wk) {
+  var cat = r.category;
   if (r.family === 'lending') return [
-    { a: 'Supply ' + d + ' of USDC as collateral to ' + nm + at + ', from its own app.', usd: 2 * tx, cn: 'of gas, two transactions', hr: 0.25 },
-    { a: 'Borrow back 30% at most in a stable, health factor over 2, one loop: a liquidation costs more than any airdrop pays.', usd: 2 * tx + dep * 0.024 * hold / 365, cn: 'of gas, 8% a year on the borrowed leg', hr: 0.25 }
+    { k: 'lend1', usd: 2 * tx, hr: 0.25 },
+    { k: 'lend2', usd: 2 * tx + dep * 0.024 * hold / 365, hr: 0.25 }        // 8% a year on a 30% borrow
   ];
   if (cat === 'Prediction Market') return [
-    { a: 'Fund ' + d + at + ' and take positions in several of ' + nm + '’s markets: it counts markets traded, not dollars parked.', usd: 4 * tx + dep * 0.01, cn: 'of gas, ~1% of spread', hr: 0.5 },
-    { a: 'Trade through resolution and claim: a resolved market reads as use, an open one as nothing.', usd: 4 * tx, cn: 'of gas, four settlements', hr: 0.4 }
+    { k: 'pm1', usd: 4 * tx + dep * 0.01, hr: 0.5 },                        // about 1% of spread
+    { k: 'pm2', usd: 4 * tx, hr: 0.4 }                                      // four settlements
   ];
   if (cat === 'Derivatives' || cat === 'Options' || cat === 'Interest Rate Derivatives') return [
-    { a: 'Deposit ' + d + ' as margin on ' + nm + at + ' and run it delta-neutral: a long against an equal short.', usd: 3 * tx + dep * 0.0008, cn: 'of gas, 0.04% of taker fee a side', hr: 0.4 },
-    { a: 'Turn the margin over weekly rather than parking it: a perp venue weights volume and open days. Leverage 2x or under.', usd: (dep * 0.0008 + tx) * wk, cn: 'of taker fees and gas, funding aside', hr: 0.25 * wk, tn: weekly(0.25 * wk, wk) }
+    { k: 'der1', usd: 3 * tx + dep * 0.0008, hr: 0.4 },                     // 0.04% of taker fee a side
+    { k: 'der2', usd: (dep * 0.0008 + tx) * wk, hr: 0.25 * wk, wk: 1 }
   ];
   if (r.family === 'trading') return [
-    { a: 'Add ' + d + ' to the deepest stable pair ' + nm + ' runs' + at + ', or route ' + d + ' of swap volume weekly if it runs no pools.', usd: 3 * tx + dep * 0.002, cn: 'of gas, 0.1% of fee a round trip', hr: 0.33 },
-    { a: 'Keep it in range and log the volume through it: a venue counts weeks of flow, one swap is not. Re-balance past 5% of drift.', usd: 4 * tx, cn: 'of gas, two re-balances', hr: 0.33 }
+    { k: 'dex1', usd: 3 * tx + dep * 0.002, hr: 0.33 },                     // 0.1% of fee a round trip
+    { k: 'dex2', usd: 4 * tx, hr: 0.33 }                                    // two re-balances
   ];
   if (r.family === 'vaults') return [
-    { a: 'Deposit ' + d + ' into the ' + nm + ' vault' + at + ' with the longest live record, not the highest yield.', usd: 2 * tx, cn: 'of gas; the performance fee is taken from the yield', hr: 0.25 },
-    { a: 'Read the curator’s allocation page weekly and log the points. Withdraw if the mandate changes or it concentrates.', usd: tx, cn: 'of gas to withdraw', hr: 0.17 * wk, tn: weekly(0.17 * wk, wk) }
+    { k: 'vault1', usd: 2 * tx, hr: 0.25 },
+    { k: 'vault2', usd: tx, hr: 0.17 * wk, wk: 1 }
   ];
   if (r.family === 'stable') {
     var kyc = cat === 'RWA' || cat === 'CeDeFi' || cat === 'Crypto Card Issuer';
     return [
-      { a: 'Mint or deposit ' + d + ' into ' + nm + '’s own stable or yield-bearing asset' + at + '.' + (kyc ? ' This category gates the mint behind KYC: a passport, a selfie, 1-3 business days.' : ''), usd: 2 * tx, cn: 'of gas' + (kyc ? ', nothing for the KYC' : ''), hr: kyc ? 0.75 : 0.25 },
-      { a: 'Read the redemption window before you size up, and hold rather than sell: these settle on a queue, not a swap.', usd: tx + dep * 0.002, cn: 'of gas, up to 0.2% to redeem', hr: 0.25, tn: 'instant to 5 business days' }
+      { k: kyc ? 'kyc1' : 'stable1', usd: 2 * tx, hr: kyc ? 0.75 : 0.25 },  // a passport and a selfie cost hours
+      { k: 'stable2', usd: tx + dep * 0.002, hr: 0.25 }                     // up to 0.2% to redeem
     ];
   }
   return [
-    { a: 'Bridge in, then delegate or restake ' + d + ' of the asset ' + nm + ' secures' + at + ', receipt token kept in the wallet.', usd: 3 * tx + dep * 0.001, cn: 'of gas, 0.1% of bridge fee', hr: 0.4 },
-    { a: 'Add in three tranches, not one lump: an infrastructure snapshot counts repeated use, one deposit is not.', usd: 3 * tx, cn: 'of gas, three tranches', hr: 0.33 }
+    { k: 'infra1', usd: 3 * tx + dep * 0.001, hr: 0.4 },                    // 0.1% of bridge fee
+    { k: 'infra2', usd: 3 * tx, hr: 0.33 }                                  // three tranches
   ];
 }
 
-/** One plan at a deposit of D: seven costed steps, totals, and the verdict netting them. */
+/** One plan at a deposit of D: seven steps, each priced and timed, the totals summed from them, and
+    the verdict netting the drop it expects against what it costs. The steps carry every number;
+    lib/plans.js writes their English from the same keys, and main.ts hands it to the page. */
 function farmPlan(r, D, share) {
-  var pick = pickChain(r.chains), chain = pick.chain, tx = pick.tx, n = r.chains.length;
+  var pick = pickChain(r.chains), tx = pick.tx;
   var dep = Math.min(D, Math.max(C.min_deposit_usd, Math.floor(r.tvl_usd * C.max_pos_share / 50) * 50));
-  var hold = holdFor(r.age_days), wk = Math.round(hold / 7), age = r.age_days;
-  var why = !chain ? 'No chain is named for it, so budget a mid-priced L2 at about ' + money(tx) + ' a transaction.'
-    : (n === 1 ? chain + ' is the only chain ' : chain + ' is the cheapest of the ' + n + ' chains ') + r.name + ' runs on, about ' + money(tx) + ' a transaction.';
-  var acts = actionsFor(r, chain, dep, tx, hold);
+  var hold = holdFor(r.age_days), wk = Math.round(hold / 7), acts = actionsFor(r, dep, tx, hold, wk);
   var steps = [
-    { a: 'Fund a fresh wallet holding only this position, seed phrase offline, never pasted into a site. ' + why, usd: tx, cn: 'of gas to fund it', hr: 0.25 },
-    { a: 'Size it at ' + money(dep) + (dep < D ? ', all that 0.01% of its ' + bigUsd(r.tvl_usd) + ' of TVL allows' : ', never above 0.01% of its ' + bigUsd(r.tvl_usd) + ' of TVL') + ', held in USDC' + on(chain) + ' first.', usd: dep * 0.001, cn: 'of bridge fee, and ' + money(dep) + ' of capital at risk', hr: 0.33 },
+    { k: 'wallet', usd: tx, hr: 0.25 },
+    { k: 'size', usd: dep * 0.001, hr: 0.33 },                              // bridging it in
     acts[0], acts[1],
-    { a: 'Do one qualifying action a week - a top-up, a repayment, a swap, a vote - so it reads as use, not a parked deposit.', usd: tx * wk, cn: 'of gas, one transaction a week', hr: 0.17 * wk, tn: weekly(0.17 * wk, wk) },
-    { a: 'Hold at least ' + hold + ' days' + (age === null ? ', longer if you can: no listing date is recorded, so treat it as young' : age < 365 ? ': it has recorded no token for only ' + age + ' days, so its snapshot is probably ahead' : ': it has run ' + age + ' days with no token, so a snapshot may already be taken') + '.', usd: 0, cn: 'in fees; the cost is the yield the ' + money(dep) + ' gives up', hr: 0, tn: hold + ' days of waiting, no attention' },
-    { a: 'Claim through the protocol’s own site or pinned account only. Never pay to claim, never sign a blind approval, never open a claim link someone sent you: an airdrop that charges is a theft.', usd: 3 * tx, cn: 'of gas to unwind and claim, nothing else, ever', hr: 0.5 }
+    { k: 'weekly', usd: tx * wk, hr: 0.17 * wk, wk: 1 },                    // one qualifying action a week
+    { k: 'hold', usd: 0, hr: 0 },                                           // waiting costs only the yield
+    { k: 'claim', usd: 3 * tx, hr: 0.5 }
   ];
   var fees = 0, hrs = 0;
   steps.forEach(function (s) { fees += s.usd; hrs += s.hr; });
@@ -370,18 +362,13 @@ function farmPlan(r, D, share) {
   var drop = r.tvl_usd > 0 ? r.implied_value_usd * share * dep / r.tvl_usd : 0;
   var cost = fees + opp, net = drop - cost;
   return {
-    chain: chain, gas_per_tx: round(tx, 4), deposit_usd: dep, capped: dep < D, hold_days: hold,
+    chain: pick.chain, gas_per_tx: round(tx, 4), deposit_usd: dep, capped: dep < D, hold_days: hold,
     share: share, weeks: wk, fees_usd: round(fees, 2), opportunity_usd: round(opp, 2),
     cost_usd: round(cost, 2), drop_usd: round(drop, 2), net_usd: round(net, 2),
     hands_on_hours: round(hrs, 2), net_per_hour_usd: round(hrs > 0 ? net / hrs : 0, 2),
     verdict: net > 0 && drop >= C.farm_ratio * cost ? 'FARM' : net > 0 ? 'MARGINAL' : 'SKIP',
-    steps: steps.map((s) => ({ action: s.a, cost: money(s.usd) + ' ' + s.cn, time: s.tn || hours(s.hr), cost_usd: round(s.usd, 2), hours: round(s.hr, 2) }))
+    steps: steps.map((s) => ({ key: s.k, cost_usd: round(s.usd, 2), hours: round(s.hr, 2), weekly: !!s.wk }))
   };
-}
-
-function stepText(s) {
-  var t = s.action + ' Cost: ' + s.cost + '. Time: ' + s.time + '.';
-  return t.length > 600 ? t.slice(0, 597) + '…' : t;
 }
 
 /* --- build it all --- */
@@ -447,7 +434,7 @@ function buildRadar(snapshot, opts) {
       implied_value_usd: x.implied,
       implied_low_usd: Math.max(1, Math.round(x.implied * Math.pow(10, ab.band.lo))),
       implied_high_usd: Math.max(1, Math.round(x.implied * Math.pow(10, ab.band.hi))),
-      peer_multiple: round(w.mult, 4), size_multiple: round(w.size, 4), offset_factor: round(w.offset, 4),
+      size_multiple: round(w.size, 4), offset_factor: round(w.offset, 4),
       momentum_factor: round(w.momentum, 4), momentum_pct: round(x.o.g, 4), clock_factor: round(w.clock, 4),
       comps_in_category: nCat, comps_in_family: nFam,
       confidence: nCat >= C.min_cat_comps && both ? 'High' : nFam >= 8 && (both || x.o.age !== null) ? 'Medium' : 'Low',
@@ -459,7 +446,6 @@ function buildRadar(snapshot, opts) {
     };
     r.farm = farmPlan(r, D, share);
     ['verdict', 'drop_usd', 'cost_usd', 'net_usd', 'hands_on_hours', 'net_per_hour_usd'].forEach((k) => { r[k] = r.farm[k]; });
-    r.farm_steps = r.farm.steps.map(stepText);
     return r;
   });
 
@@ -505,5 +491,5 @@ function buildRadar(snapshot, opts) {
   };
 }
 
-root.RadarModel = { VERSION: C.version, CONSTANTS: C, FAMILIES: FAMILIES, BUCKETS: BUCKETS, buildRadar: buildRadar, peersFor: peersFor, farmPlan: farmPlan, stepText: stepText, seal: seal };
+root.RadarModel = { VERSION: C.version, CONSTANTS: C, FAMILIES: FAMILIES, BUCKETS: BUCKETS, buildRadar: buildRadar, peersFor: peersFor, farmPlan: farmPlan, seal: seal };
 })(typeof globalThis !== 'undefined' ? globalThis : this);

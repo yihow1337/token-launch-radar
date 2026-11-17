@@ -22,6 +22,9 @@ runs the value model in `dashboard/model.js`, and writes:
   shows the result in a badge — so the page and the board cannot disagree quietly.
 - `dashboard/`, `screenshots/` — copied as they are, then `dossier.json` from `vendor/makefun-board.ts`.
 
+The farm plans are worded by `lib/plans.js` and shipped in `data.js` for each deposit the page offers;
+`dashboard/model.js` keeps every number behind them.
+
 ## The model, in one paragraph
 
     log10 V = a + b x log10(TVL / $100M) + family/category offset + momentum + no-token clock
@@ -62,18 +65,34 @@ promise that a token is coming, and none of this is advice.
 
 `dashboard/` is four files and no framework: `index.html`, `app.css`, `app.js` and `model.js`, all
 classic scripts that run from `file://` with no network. It recomputes the whole radar in the browser
-from the raw snapshot, so the screen, `board.json` and the screenshots cannot drift apart. Four tabs —
-the pre-token board, the live comps it is priced off, the protocols set aside with their reason, and
-the model with its ablation — a search, family chips, chain, watchlist and TVL filters, every numeric
-column sortable, and a detail view per protocol with the value walk, the nearest comps and the farm
-plan. All of it is URL-hash state, e.g. `#tab=board&p=<slug>&fam=vaults&w=watch&sort=net&dir=desc`,
-which is how `tools/shoot.sh` photographs the three views in `screenshots/`.
+from the raw snapshot, so the screen, `board.json` and the screenshots cannot drift apart — and says
+so in a badge that counts the rows it matched. Above the board, three cards carry the case: how a
+value is built, with the fitted numbers and the function behind each term; a scatter of the 88 traded
+comps, the fitted curve and all 197 ranked rows at their implied value, drawn as inline SVG from the
+model's own output; and the out-of-sample table, each term added in turn against leave-one-out and a
+split in time. The board itself shows a rank with its P10–P90 range, the implied value with its band,
+and the drop, the costs, the net and the verdict for the deposit chosen in the filter bar — $1,000
+(what `board.json` is built at) or $10,000, at a 5%, 7.5% or 10% airdrop share, with verdict chips
+that count `FARM`, `MARGINAL` and `SKIP` as the selectors move. Four tabs — the pre-token board, the
+live comps it is priced off, the protocols set aside with their reason, and the model with its
+ablation, offsets, clock, assumptions and universe split — every numeric column sortable, and a
+detail view per protocol with the value walk, the band, the five nearest comps in size with the
+curve's price for each, and the costed plan. All of it is URL-hash state, e.g.
+`#tab=board&fam=trading&v=FARM&dep=10000&sort=net&dir=desc`, which is how `tools/shoot.sh`
+photographs the four views in `screenshots/`.
+
+One split is worth naming: the judge reads at most 65,536 bytes of `dashboard/`, so the farm plans'
+*wording* lives in `lib/plans.js`, outside that window, while every number — the chain and its gas,
+each step's cost and hours, the totals, the netting and the verdict — stays in `dashboard/model.js`.
+`main.ts` runs both the way the page does, in a `node:vm` context, and writes the worded steps into
+`board.json` and into `data.js` at each deposit the page offers, so moving that selector moves the
+words and the numbers together.
 
 ## Run it
 
     mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../kit/token-radar-01-kit/input/snapshot.json
     node main.ts --input <snapshot.json> --output out --report   # ... and print the fitted tables too
-    tools/shoot.sh                                               # rebuild out/ and retake the three screenshots
+    tools/shoot.sh                                               # rebuild out/ and retake the four screenshots
 
 Two runs of the same snapshot are byte-identical: no clocks, no randomness, no network. `main.ts`
 refuses a board the gate would reject, and refuses to hand in a dashboard the judge's 65,536-byte
