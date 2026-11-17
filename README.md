@@ -1,5 +1,11 @@
 # Token Launch Radar
 
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/yihow1337/token-launch-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/yihow1337/token-launch-radar/reward.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+
+Built for [make.fun](https://make.fun)'s token-radar-01 bounty.
+
 An entry for the make.fun bounty [token-radar-01](https://make.fun/c/token-radar-01): a static dashboard
 that ranks the protocols whose token does not exist yet, by an implied value read off the market's own
 comparables, and gives each one a farm plan with costs and times.
