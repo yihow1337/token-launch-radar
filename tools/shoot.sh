@@ -41,4 +41,4 @@ PY
 
 shoot 1-board  '#tab=board'
 shoot 2-detail '#tab=board&p=steakhouse-financial'
-shoot 3-filtered '#tab=board&fam=vaults&w=watch&sort=ev&dir=desc'
+shoot 3-filtered '#tab=board&fam=vaults&w=watch&sort=net&dir=desc'

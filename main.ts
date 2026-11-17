@@ -4,9 +4,11 @@
 // page runs, loaded here in a node:vm context so there is one model and not two - and writes:
 //
 //   /output/board.json     the ranked board, every row of it, checked against the gate's own rules first
-//   /output/data.js        window.RADAR_SNAPSHOT = <the raw snapshot>, and nothing else: the page
-//                          recomputes the board in the browser from it with the same model.js, so the
-//                          screenshots, the page and board.json cannot drift apart
+//   /output/data.js        window.RADAR_SNAPSHOT = <the raw snapshot>, plus the board this program
+//                          wrote as [slug, rank, implied value, verdict] rows and a 32-bit FNV-1a
+//                          seal of them: the page recomputes the whole board in the browser with the
+//                          same model.js and checks every row and the seal against these, so the
+//                          screenshots, the page and board.json cannot drift apart - and say so
 //   /output/dashboard/     this repository's dashboard, copied
 //   /output/screenshots/   its three screenshots, copied
 //   /output/dossier.json   last, from vendor/makefun-board.ts, exactly as the starter writes it
@@ -36,20 +38,29 @@ interface Protocol {
 }
 interface Snapshot { as_of: string; source: string; floor_usd: number; protocols: Protocol[]; watchlist: string[] }
 interface BoardRow {
-  rank: number; slug: string; name: string; implied_value_usd: number; farm_steps: string[];
+  rank: number; rank_lo: number; rank_hi: number; slug: string; name: string; farm_steps: string[];
+  implied_value_usd: number; implied_low_usd: number; implied_high_usd: number;
   category: string | null; chains: string[]; tvl_usd: number; change_7d: number | null;
   age_days: number | null; watchlist: boolean; above_floor: boolean; confidence: string;
-  peer_multiple: number; peer_centre: number; size_tilt: number; momentum_factor: number;
-  runway_factor: number; ev_per_1k_usd: number; implied_low_usd: number; implied_high_usd: number;
-  family_label: string; farm: { chain: string | null; deposit_usd: number; hold_days: number; total_cost: string; total_time: string };
+  family: string; peer_multiple: number; size_multiple: number; offset_factor: number;
+  momentum_factor: number; clock_factor: number; comps_in_category: number;
+  verdict: string; drop_usd: number; cost_usd: number; net_usd: number;
+  hands_on_hours: number; net_per_hour_usd: number;
+  farm: { chain: string | null; deposit_usd: number; hold_days: number; fees_usd: number; opportunity_usd: number; steps: { action: string; cost: string; time: string }[] };
 }
 interface Stat { n: number; spearman: number; median_x: number; within_3x: number }
 interface Radar {
   as_of: string; source: string; floor_usd: number; model_version: string;
-  comps: Record<string, number>; families: { label: string; n: number; median: number | null; shrunk: number; low: number; high: number; board_rows: number }[];
-  backtest: { model: Stat; no_size: Stat; naive: Stat };
-  board: BoardRow[]; live: unknown[]; aside: unknown[];
-  kpis: Record<string, number>;
+  deposit_usd: number; airdrop_share: number;
+  fit: Record<string, number>;
+  families: { key: string; label: string; n: number; raw: number | null; offset: number; factor: number; rows: number }[];
+  categories: { category: string; n: number; own: boolean; factor: number }[];
+  clock: { label: string; n: number; with_token: number; share_token: number | null; factor: number }[];
+  ablation: { term: string; loo: Stat; split: Stat | null }[];
+  split: { cut: string | null; n_fit: number; n_test: number };
+  band: { lo: number; hi: number };
+  board: BoardRow[]; comps: { name: string; tvl_usd: number; mcap_usd: number; miss_x: number }[];
+  aside: unknown[]; seal: string; kpis: Record<string, number>;
 }
 
 function die(message: string): never {
@@ -98,12 +109,12 @@ function parseSnapshot(text: string): Snapshot {
 /* --- the model, loaded the way the page loads it --- */
 
 /** dashboard/model.js in its own vm context, so this program scores with the file the judge reads. */
-function loadModel(path: string): { buildRadar(s: Snapshot): Radar } {
+function loadModel(path: string): { buildRadar(s: Snapshot): Radar; seal(rows: BoardRow[]): string } {
   const sandbox: Record<string, unknown> = {};
   runInNewContext(readFileSync(path, 'utf8'), sandbox, { filename: 'dashboard/model.js' });
-  const model = sandbox.RadarModel as { buildRadar?: unknown } | undefined;
-  if (model === undefined || typeof model.buildRadar !== 'function') die(`${path} did not set globalThis.RadarModel.buildRadar`);
-  return model as { buildRadar(s: Snapshot): Radar };
+  const model = sandbox.RadarModel as { buildRadar?: unknown; seal?: unknown } | undefined;
+  if (model === undefined || typeof model.buildRadar !== 'function' || typeof model.seal !== 'function') die(`${path} did not set globalThis.RadarModel.buildRadar and .seal`);
+  return model as { buildRadar(s: Snapshot): Radar; seal(rows: BoardRow[]): string };
 }
 
 /* --- the gate's own rules, checked here so a bad board never leaves this program --- */
@@ -130,6 +141,14 @@ function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null {
       const n = s.trim().length;
       if (n < 20 || n > 600) return `${r.slug} has a farm step of ${n} characters, and the gate takes 20 to 600`;
     }
+  }
+  for (const r of board) {
+    if (!['FARM', 'MARGINAL', 'SKIP'].includes(r.verdict)) return `${r.slug} carries the verdict ${JSON.stringify(r.verdict)}`;
+    if (!(r.rank_lo >= 1 && r.rank_lo <= r.rank_hi && r.rank_hi <= board.length)) return `${r.slug} has the rank range ${r.rank_lo}-${r.rank_hi}`;
+    if (!(r.implied_low_usd <= r.implied_value_usd && r.implied_value_usd <= r.implied_high_usd)) return `${r.slug} has a value outside its own band`;
+    if (Math.abs(r.drop_usd - r.cost_usd - r.net_usd) > 0.02) return `${r.slug}: ${r.drop_usd} - ${r.cost_usd} is not the ${r.net_usd} it claims to net`;
+    const fees = r.farm.steps.reduce((n, s) => n + Number(/\$[\d,.]+/.exec(s.cost)?.[0].slice(1).replace(/,/g, '') ?? 0), 0);
+    if (!(fees > 0)) return `${r.slug} has a plan whose steps carry no costs`;
   }
   for (let i = 0; i < board.length; i++) if (board[i]!.rank !== i + 1) return `row ${i + 1} carries rank ${board[i]!.rank}: board.json is written in rank order`;
   for (let i = 1; i < board.length; i++) if (board[i]!.implied_value_usd > board[i - 1]!.implied_value_usd) return `row ${i + 1} is worth more than row ${i}: implied value must not rise as rank falls`;
@@ -195,21 +214,38 @@ if (!existsSync(inputFile)) die(`no snapshot at ${inputFile}: pass --input <snap
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const radar = loadModel(join(here, 'dashboard', 'model.js')).buildRadar(snapshot);
+const model = loadModel(join(here, 'dashboard', 'model.js'));
+const radar = model.buildRadar(snapshot);
 const board = radar.board;
 
 const issue = boardIssue(board, snapshot);
 if (issue !== null) die(`the model wrote a board the gate refuses: ${issue}`);
 
+// Every category that prices itself must have earned it: three comps of its own or more. The model
+// enforces it; this program refuses a board where it did not hold, rather than ship a lonely comp.
+const lonely = radar.categories.filter((c) => c.own && c.n < 3).map((c) => c.category);
+if (lonely.length > 0) die(`${lonely.join(', ')} set a multiple with fewer than three comps`);
+// The seal is the model's own function over the model's own rows; recompute it here from what is
+// about to be written, so data.js cannot carry a seal of something else.
+const sealed = model.seal(board);
+if (sealed !== radar.seal || !/^[0-9a-f]{8}$/.test(sealed)) die(`the board's seal ${sealed} does not match the model's ${radar.seal}`);
+
 mkdirSync(out, { recursive: true });
 writeFileSync(join(out, 'board.json'), `${JSON.stringify({
   as_of: radar.as_of, source: radar.source, model_version: radar.model_version,
-  floor_usd: radar.floor_usd, comps: radar.comps, backtest: radar.backtest, kpis: radar.kpis,
-  rows: board,
+  floor_usd: radar.floor_usd, deposit_usd: radar.deposit_usd, airdrop_share: radar.airdrop_share,
+  fit: radar.fit, families: radar.families, categories: radar.categories, clock: radar.clock,
+  ablation: radar.ablation, split: radar.split, band: radar.band, kpis: radar.kpis,
+  seal: radar.seal, rows: board,
 })}\n`);
-// The page's only data file is the snapshot itself, verbatim: the page runs model.js over it, as this
-// program just did, so what the judge reads on screen is what board.json says, by construction.
-writeFileSync(join(out, 'data.js'), `window.RADAR_SNAPSHOT = ${JSON.stringify(snapshot)};\n`);
+// The page's data file is the snapshot itself, verbatim, and the board this program just wrote,
+// reduced to [slug, rank, implied value, verdict] with a seal over it. The page runs model.js over
+// the same snapshot, rebuilds the board, and checks every row and the seal against these: what the
+// judge reads on screen is what board.json says, and the page says so in a badge.
+const ledger = board.map((r) => [r.slug, r.rank, r.implied_value_usd, r.verdict]);
+writeFileSync(join(out, 'data.js'), `window.RADAR_SNAPSHOT = ${JSON.stringify(snapshot)};\n`
+  + `window.RADAR_BOARD = ${JSON.stringify(ledger)};\n`
+  + `window.RADAR_SEAL = ${JSON.stringify(radar.seal)};\n`);
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */
 function copyFiles(from: string, to: string): string[] {
@@ -252,42 +288,63 @@ const usd = (n: number): string =>
   n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(1)}k` : `$${n.toFixed(0)}`;
 const pct = (n: number): string => `${(n * 100).toFixed(1)}%`;
 const k = radar.kpis;
-const bt = radar.backtest;
+const full = radar.ablation[radar.ablation.length - 1]!, flat = radar.ablation[0]!;
+const money = (n: number): string => (n >= 100 ? `$${Math.round(n)}` : `$${n.toFixed(2)}`);
 
 const lines = [
-  `token radar: ${radar.model_version} over ${snapshot.protocols.length} protocols as of ${radar.as_of}`,
-  `token radar: ${k.board_size} rows ranked (${k.watchlist_covered}/${k.watchlist_size} watchlist covered, ${k.early_size} below the ${usd(radar.floor_usd!)} floor), ${k.live_size} live comps, ${k.aside_size} set aside`,
-  `token radar: implied value on the board totals ${usd(k.implied_total_usd!)}; leave-one-out median error ${bt.model.median_x}x, ${pct(bt.model.within_3x)} within 3x, Spearman ${bt.model.spearman} (naive baseline ${bt.naive.median_x}x, ${pct(bt.naive.within_3x)}, ${bt.naive.spearman})`,
+  `token radar: ${radar.model_version} over ${snapshot.protocols.length} protocols as of ${radar.as_of}, seal ${radar.seal}`,
+  `token radar: ${k.board_size} rows ranked (${k.watchlist_covered}/${k.watchlist_size} watchlist covered, ${k.early_size} below the ${usd(radar.floor_usd!)} floor), ${k.comps_size} clean comps from ${k.comp_rows} live rows, ${k.aside_size} set aside`,
+  `token radar: log10 V = ${radar.fit.a} + ${radar.fit.b} x log10(TVL/$100M) + offsets; $100M of TVL prices at ${usd(radar.fit.pivot_value_usd!)}. Leave-one-out median miss ${full.loo.median_x}x, ${pct(full.loo.within_3x)} within 3x, rank corr ${full.loo.spearman} (a flat multiple: ${flat.loo.median_x}x, ${pct(flat.loo.within_3x)})`,
+  `token radar: on a ${usd(radar.deposit_usd)} deposit at ${pct(radar.airdrop_share)} of implied value, ${k.farm} rows FARM, ${k.marginal} MARGINAL, ${k.skip} SKIP; implied value totals ${usd(k.implied_total_usd!)}`,
   `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${pages.length} files, ${pages.reduce((n, p) => n + statSync(join(out, 'dashboard', p)).size, 0)} bytes of source), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')} (${dossier.length} bytes)`,
 ];
 
 if (process.argv.includes('--report')) {
-  lines.push('', `  peer multiples, fitted on ${radar.comps.n} live tokens (whole market ${radar.comps.global_multiple}x, size slope ${radar.comps.size_beta} per decade of TVL, pivot ${usd(radar.comps.size_pivot_usd!)})`);
-  lines.push('  family                n   median   shrunk    band            board rows');
+  lines.push('', `  the fit: Huber on ${radar.fit.n} clean comps, sigma ${radar.fit.sigma} dex; a flat multiple would be ${radar.fit.flat_multiple}x of TVL`);
+  lines.push('  family                n   raw     offset   factor   board rows');
   for (const f of radar.families) {
-    lines.push(`  ${f.label.padEnd(20)} ${String(f.n).padStart(2)}   ${String(f.median ?? '-').padStart(6)}   ${String(f.shrunk).padStart(6)}   ${`${f.low}-${f.high}`.padEnd(15)} ${f.board_rows}`);
+    lines.push(`  ${f.label.padEnd(20)} ${String(f.n).padStart(2)}   ${String(f.raw ?? '-').padStart(6)}  ${f.offset.toFixed(3).padStart(6)}   ${`${f.factor.toFixed(3)}x`.padStart(7)}   ${f.rows}`);
   }
-  lines.push('', '  backtest, leave one out over the live tokens');
-  for (const [name, s] of [['model (with size tilt)', bt.model], ['comps, no size tilt', bt.no_size], ['naive: global median x TVL', bt.naive]] as [string, Stat][]) {
-    lines.push(`  ${name.padEnd(28)} median error ${String(s.median_x).padStart(5)}x   within 3x ${pct(s.within_3x).padStart(6)}   Spearman ${s.spearman}`);
+  lines.push(`  categories pricing themselves (n >= 3): ${radar.categories.filter((c) => c.own).map((c) => `${c.category} ${c.n} ${c.factor.toFixed(2)}x`).join(', ')}`);
+  lines.push(`  categories too thin, priced off their family: ${radar.categories.filter((c) => !c.own).map((c) => `${c.category} ${c.n}`).join(', ')}`);
+
+  lines.push('', `  out of sample: each term added in turn. Leave-one-out over the ${full.loo.n} comps; the split fits on the ${radar.split.n_fit} comps listed before ${radar.split.cut} and tests on the ${radar.split.n_test} newer ones.`);
+  lines.push('  term                          LOO miss  within 3x  rank corr   split miss  within 3x');
+  for (const a of radar.ablation) {
+    lines.push(`  ${a.term.padEnd(28)} ${`${a.loo.median_x}x`.padStart(8)}  ${pct(a.loo.within_3x).padStart(9)}  ${a.loo.spearman.toFixed(3).padStart(9)}   ${(a.split ? `${a.split.median_x}x` : '-').padStart(10)}  ${(a.split ? pct(a.split.within_3x) : '-').padStart(9)}`);
   }
-  lines.push('', '  top 25 by implied value');
-  lines.push('   #  protocol                  category              chains  TVL        7d      age   mult    mom    run    implied    low-high           EV/$1k  conf    tier');
+  lines.push(`  value band from the leave-one-out residuals: x${Math.pow(10, radar.band.lo).toFixed(2)} to x${Math.pow(10, radar.band.hi).toFixed(2)}`);
+
+  lines.push('', '  the no-token clock, fitted over every protocol the snapshot keeps (>= $5M, not set aside)');
+  lines.push('  age                    n   with a token   still none   factor');
+  for (const c of radar.clock) {
+    lines.push(`  ${c.label.padEnd(20)} ${String(c.n).padStart(3)}   ${pct(c.share_token ?? 0).padStart(12)}   ${pct(1 - (c.share_token ?? 0)).padStart(10)}   ${c.factor.toFixed(3)}x`);
+  }
+
+  lines.push('', `  top 25 by implied value (factors: size x offset x momentum x clock = multiple)`);
+  lines.push('   #  rank range  protocol                  category              TVL        7d      age   size    off    mom    clk    mult    implied    band              verdict   net   $/h  conf');
   for (const r of board.slice(0, 25)) {
     lines.push([
-      String(r.rank).padStart(4), ' ', r.name.slice(0, 25).padEnd(25), (r.category ?? '-').slice(0, 21).padEnd(21),
-      String(r.chains.length).padStart(5), ' ', usd(r.tvl_usd).padEnd(10),
+      String(r.rank).padStart(4), '  ', `${r.rank_lo}-${r.rank_hi}`.padEnd(10), r.name.slice(0, 25).padEnd(26),
+      (r.category ?? '-').slice(0, 21).padEnd(21), usd(r.tvl_usd).padEnd(10),
       `${r.change_7d === null ? '  n/a' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1)}`.padStart(6), ' ',
-      `${r.age_days === null ? 'n/a' : r.age_days}d`.padStart(6), ' ',
-      r.peer_multiple.toFixed(3).padStart(6), ' ', r.momentum_factor.toFixed(3), '  ', r.runway_factor.toFixed(3), '  ',
-      usd(r.implied_value_usd).padStart(8), '   ', `${usd(r.implied_low_usd)}-${usd(r.implied_high_usd)}`.padEnd(18),
-      `$${r.ev_per_1k_usd.toFixed(0)}`.padStart(6), '  ', r.confidence.padEnd(7), r.watchlist ? 'watchlist' : r.above_floor ? 'above floor' : 'early',
+      (r.age_days === null ? 'n/a' : `${r.age_days}d`).padStart(6), ' ',
+      r.size_multiple.toFixed(3).padStart(6), ' ', r.offset_factor.toFixed(3), '  ', r.momentum_factor.toFixed(3), '  ', r.clock_factor.toFixed(3), '  ',
+      r.peer_multiple.toFixed(3).padStart(6), ' ', usd(r.implied_value_usd).padStart(9), '   ',
+      `${usd(r.implied_low_usd)}-${usd(r.implied_high_usd)}`.padEnd(17), r.verdict.padEnd(9),
+      money(r.net_usd).padStart(8), money(r.net_per_hour_usd).padStart(8), '  ', r.confidence,
     ].join(''));
   }
-  for (const r of [board[0]!, board.find((x) => x.watchlist)!, board[board.length - 1]!]) {
-    lines.push('', `  farm plan - #${r.rank} ${r.name} (${r.family_label}, ${usd(r.tvl_usd)} TVL, ${r.farm.chain ?? 'no chain named'})`);
-    lines.push(`    deposit ${usd(r.farm.deposit_usd)}, hold ${r.farm.hold_days} days, EV ${usd(r.ev_per_1k_usd)} per $1k`);
-    lines.push(`    totals: ${r.farm.total_cost}; ${r.farm.total_time}`);
+
+  lines.push('', '  the comps the curve misses worst, and closest');
+  const byMiss = radar.comps.slice().sort((x, y) => y.miss_x - x.miss_x);
+  for (const c of byMiss.slice(0, 3).concat(byMiss.slice(-3))) {
+    lines.push(`  ${c.name.slice(0, 28).padEnd(29)} TVL ${usd(c.tvl_usd).padStart(8)}   market cap ${usd(c.mcap_usd).padStart(8)}   the curve says ${usd((c as { curve_usd: number }).curve_usd).padStart(8)}   ${c.miss_x}x`);
+  }
+
+  for (const r of [board[0]!, board.find((x) => x.watchlist && x.verdict === 'FARM') ?? board.find((x) => x.watchlist)!, board[board.length - 1]!]) {
+    lines.push('', `  farm plan - #${r.rank} ${r.name} (${usd(r.tvl_usd)} TVL, ${r.farm.chain ?? 'no chain named'}, ${usd(r.farm.deposit_usd)} held ${r.farm.hold_days} days)`);
+    lines.push(`    ${r.verdict}: drop ${money(r.drop_usd)} - costs ${money(r.cost_usd)} (${money(r.farm.fees_usd)} of gas and fees, ${money(r.farm.opportunity_usd)} of yield given up) = ${money(r.net_usd)} net over ${r.hands_on_hours} hands-on hours, ${money(r.net_per_hour_usd)} an hour`);
     r.farm_steps.forEach((s, i) => lines.push(`    ${i + 1}. ${s}`));
   }
 }

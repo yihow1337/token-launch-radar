@@ -1,14 +1,25 @@
 /* Token Launch Radar - the view. A classic script, no framework and no network: it recomputes the
-   whole radar in the browser out of the raw snapshot with model.js, the same file main.ts ran to write
-   board.json, so every number on screen is one the board claims. All state lives in the URL hash
-   (#tab=board&p=<slug>&fam=<family>&w=watch&sort=imp&dir=desc), so any view can be linked and shot. */
+   radar in the browser from the raw snapshot with model.js, the file main.ts ran to write board.json,
+   then checks itself against the rows and seal main.ts left in data.js. State is in the URL hash
+   (#tab=board&p=<slug>&fam=<family>&w=watch&sort=imp&dir=desc), so any view can be shot. */
 (function () {
   'use strict';
 
   var root = document.getElementById('main');
   var M = window.RadarModel, SNAP = window.RADAR_SNAPSHOT;
   if (!M || !SNAP) { root.textContent = 'data.js or model.js did not load.'; return; }
-  var R = M.buildRadar(SNAP), C = M.CONSTANTS, K = R.kpis, BT = R.backtest;
+  var R = M.buildRadar(SNAP), C = M.CONSTANTS, K = R.kpis;
+  var AB = R.ablation[R.ablation.length - 1], FLAT = R.ablation[0];
+  // board.json, written by main.ts from this same model.js and sealed: the page rebuilds the board
+  // here and checks itself against it, row by row.
+  var SEALED = window.RADAR_BOARD || [], CHECK = (function () {
+    var ok = 0;
+    SEALED.forEach(function (x, i) {
+      var r = R.board[i];
+      if (r && r.slug === x[0] && r.rank === x[1] && r.implied_value_usd === x[2] && r.verdict === x[3]) ok++;
+    });
+    return { n: ok, of: SEALED.length, match: ok === SEALED.length && SEALED.length > 0 && R.seal === window.RADAR_SEAL };
+  })();
 
   /* --- text --- */
 
@@ -54,17 +65,17 @@
 
   var TABS = {
     board: { label: 'Pre-token board', n: K.board_size },
-    live: { label: 'Live tokens', n: K.live_size, alt: true },
+    live: { label: 'Live comps', n: K.comps_size, alt: true },
     aside: { label: 'Set aside', n: K.aside_size },
     model: { label: 'Model & method', n: null }
   };
 
   /* --- filters --- */
 
-  var TVL_STEPS = [['0', 'any'], ['5', '$5M'], ['20', '$20M'], ['50', '$50M (floor)'], ['250', '$250M'], ['1000', '$1B']];
+  var TVL_STEPS = [['0', 'any'], ['5', '$5M'], ['20', '$20M'], ['50', '$50M'], ['250', '$250M'], ['1000', '$1B']];
   var CHAINS = (function () {
     var seen = {};
-    R.board.concat(R.live, R.aside).forEach(function (r) { (r.chains || []).forEach(function (c) { seen[c] = (seen[c] || 0) + 1; }); });
+    R.board.concat(R.comps, R.aside).forEach(function (r) { (r.chains || []).forEach(function (c) { seen[c] = (seen[c] || 0) + 1; }); });
     return Object.keys(seen).sort((a, b) => seen[b] - seen[a] || (a < b ? -1 : 1));
   })();
 
@@ -118,7 +129,7 @@
 
   /* --- sortable tables --- */
 
-  var CONF_ORDER = { High: 3, Medium: 2, Low: 1 };
+  var VERDICT_ORDER = { FARM: 3, MARGINAL: 2, SKIP: 1 };
 
   /** Columns as [key, label, kind, value], kind 0 = text, 1 = numeric, 2 = numeric but counting up. */
   function cols(list) {
@@ -129,18 +140,19 @@
     ['name', 'Protocol', 0, (r) => r.name.toLowerCase()],
     ['tvl', 'TVL', 1, (r) => r.tvl_usd],
     ['d7', '7d', 1, (r) => r.change_7d === null ? -1e9 : r.change_7d],
-    ['age', 'No-token runway', 1, (r) => r.age_days === null ? -1 : r.age_days],
+    ['age', 'No token for', 1, (r) => r.age_days === null ? -1 : r.age_days],
     ['mult', 'Peer multiple', 1, (r) => r.peer_multiple],
     ['imp', 'Implied value', 1, (r) => r.implied_value_usd],
-    ['ev', 'EV per $1k', 1, (r) => r.ev_per_1k_usd],
-    ['conf', 'Confidence', 1, (r) => CONF_ORDER[r.confidence]]
+    ['net', 'Net on $1k', 1, (r) => r.net_usd],
+    ['verdict', 'Verdict', 1, (r) => VERDICT_ORDER[r.verdict]]
   ]);
   var LIVE_COLS = cols([
     ['name', 'Live token', 0, (r) => r.name.toLowerCase()],
     ['tvl', 'TVL', 1, (r) => r.tvl_usd],
     ['mcap', 'Market cap', 1, (r) => r.mcap_usd],
     ['ratio', 'mcap / TVL', 1, (r) => r.ratio],
-    ['d7', '7d', 1, (r) => r.change_7d === null ? -1e9 : r.change_7d]
+    ['curve', 'The curve says', 1, (r) => r.curve_usd],
+    ['miss', 'Miss', 1, (r) => -r.miss_x]
   ]);
   var ASIDE_COLS = cols([
     ['name', 'Protocol', 0, (r) => r.name.toLowerCase()],
@@ -190,7 +202,7 @@
 
   function boardRow(r) {
     return '<tr class="' + (r.watchlist ? 'watch' : '') + (r.slug === S.p ? ' open' : '') + '">' +
-      '<td class="rank num">' + r.rank + '</td>' +
+      '<td class="rank num">' + r.rank + '<span class="lh">' + r.rank_lo + '–' + r.rank_hi + '</span></td>' +
       '<td><a class="open" href="#tab=board&p=' + encodeURIComponent(r.slug) + '"><span class="pname">' + esc(r.name) + '</span>' +
       (r.watchlist ? '<span class="badge">watchlist</span>' : r.above_floor ? '' : '<span class="badge early">early</span>') +
       '<span class="psub">' + sub(r) + '</span></a></td>' +
@@ -200,43 +212,37 @@
       num(mult(r.peer_multiple)) +
       '<td class="num imp">' + usd(r.implied_value_usd) + band(r) +
       '<span class="lh">' + usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd) + '</span></td>' +
-      num(dollars(r.ev_per_1k_usd)) +
-      num('<span class="conf ' + r.confidence + '">' + r.confidence + '</span>') + '</tr>';
+      num(dollars(r.net_usd)) +
+      num('<span class="conf ' + r.verdict + '">' + r.verdict + '</span>') + '</tr>';
   }
 
-  function boardTable() {
-    var rows = sortRows(visible(R.board), BOARD_COLS, BOARD_COLS[0]);
-    return filterBar(R.board.length, rows.length) +
-      '<div class="wrap"><table class="board">' + head(BOARD_COLS, BOARD_COLS[0]) +
-      '<tbody>' + rows.map(boardRow).join('') + '</tbody></table></div>' +
-      (rows.length ? '' : '<p class="muted">No row passes those filters.</p>');
+  function table(rows, cols, fallback, note, rowFn, cls) {
+    var seen = sortRows(visible(rows), cols, fallback);
+    return filterBar(rows.length, seen.length) + (note ? '<p class="note">' + note + '</p>' : '') +
+      '<div class="wrap"><table class="' + (cls || '') + '">' + head(cols, fallback) + '<tbody>' +
+      seen.map(rowFn).join('') + '</tbody></table></div>' +
+      (seen.length ? '' : '<p class="muted">No row passes those filters.</p>');
   }
 
-  /* --- live tokens: the comps the multiples are read off --- */
+  function boardTable() { return table(R.board, BOARD_COLS, BOARD_COLS[0], '', boardRow, 'board'); }
 
   function liveTable() {
-    var rows = sortRows(visible(R.live), LIVE_COLS, LIVE_COLS[2]);
-    return filterBar(R.live.length, rows.length) +
-      '<p class="note">These ' + K.live_size + ' protocols already have a token that trades, so they are never ranked: they are ' +
-      'the evidence. Every peer multiple on the board is the median log10(mcap / TVL) of this table, over the row\'s category, ' +
-      'then its family, then the whole market.</p>' +
-      '<div class="wrap"><table>' + head(LIVE_COLS, LIVE_COLS[2]) + '<tbody>' + rows.map(function (r) {
+    return table(R.comps, LIVE_COLS, LIVE_COLS[2], 'These ' + K.comps_size + ' tokens already trade, so they are never ' +
+      'ranked: they are the evidence, and the last columns are the curve\'s miss where the answer is known.',
+      function (r) {
         return '<tr><td><span class="pname">' + esc(r.name) + '</span><span class="badge ochre">live</span>' +
-          '<span class="psub">' + sub(r) + '</span></td>' +
-          num(usd(r.tvl_usd)) + num(usd(r.mcap_usd)) + num(mult(r.ratio)) + num(pctCell(r.change_7d)) + '</tr>';
-      }).join('') + '</tbody></table></div>';
+          '<span class="psub">' + sub(r) + '</span></td>' + num(usd(r.tvl_usd)) + num(usd(r.mcap_usd)) +
+          num(mult(r.ratio)) + num(usd(r.curve_usd)) + num(r.miss_x + '×') + '</tr>';
+      });
   }
 
   function asideTable() {
-    var rows = sortRows(visible(R.aside), ASIDE_COLS, ASIDE_COLS[1]);
-    return filterBar(R.aside.length, rows.length) +
-      '<p class="note">' + K.aside_size + ' protocols record no token but are not a launch of their own: a wrapper, a bridge, a ' +
-      'staked or versioned product of an asset that trades. Shown with their reason, not dropped — except a watchlist slug a ' +
-      'rule touches, which is ranked anyway and flagged.</p>' +
-      '<div class="wrap"><table>' + head(ASIDE_COLS, ASIDE_COLS[1]) + '<tbody>' + rows.map(function (r) {
+    return table(R.aside, ASIDE_COLS, ASIDE_COLS[1], K.aside_size + ' protocols that are a derivative of something that ' +
+      'already trades: shown with the reason, never used as comps. A watchlist slug a rule touches is ranked.',
+      function (r) {
         return '<tr><td><span class="pname">' + esc(r.name) + '</span><span class="psub">' + sub(r) + '</span></td>' +
           num(usd(r.tvl_usd)) + '<td>' + esc(r.reason) + '</td></tr>';
-      }).join('') + '</tbody></table></div>';
+      });
   }
 
   /* --- one protocol: the value walk, the comps behind it and the farm plan --- */
@@ -246,46 +252,43 @@
   }
 
   function detail(r) {
-    var f = r.farm, peers = M.peersFor(R, r, 4);
+    var f = r.farm, bk = R.clock[r.age_bucket], nc = r.comps_in_category;
     var walk = [
       factor('TVL', usd(r.tvl_usd), 'the snapshot\'s own figure'),
-      factor('Peer multiple', mult(r.peer_multiple), r.comps_in_category + ' live comp' + (r.comps_in_category === 1 ? '' : 's') +
-        ' in its category, ' + r.comps_in_family + ' in its family: centre ' + mult(r.peer_centre) + ' × size tilt ' +
-        r.size_tilt.toFixed(2) + '×'),
+      factor('Size curve', mult(r.size_multiple), '10^(' + R.fit.a + ' + ' + R.fit.b + ' × log10(TVL/$100M)) over TVL'),
+      factor('Family offset', r.offset_factor.toFixed(3) + '×', nc + ' comp' + (nc === 1 ? '' : 's') + ' in its category, ' +
+        r.comps_in_family + ' in its family' + (nc < C.min_cat_comps ? ': priced off the family' : '')),
       factor('Momentum', r.momentum_factor.toFixed(3) + '×', '7d ' + (r.change_7d === null ? 'not recorded, counted flat' : signed(r.momentum_pct)) + ', damped to its root'),
-      factor('No-token runway', r.runway_factor.toFixed(3) + '×', (r.age_days === null ? 'no listing date, counted 365 d' : r.age_days + ' days with no token') + ', 0.8 → 1.2 at 3 yr'),
-      factor('Implied value', usd(r.implied_value_usd), 'band ' + usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd), true)
-    ];
-    var kv = [
-      ['Implied value', usd(r.implied_value_usd)],
-      ['Low – high band', usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd)],
-      ['Peer multiple band', mult(r.peer_multiple_low) + ' – ' + mult(r.peer_multiple_high)],
-      ['Live comps in its category / family', r.comps_in_category + ' / ' + r.comps_in_family],
-      ['Confidence', r.confidence],
-      ['EV on a $' + C.deposit_usd.toLocaleString('en-US') + ' deposit', dollars(r.ev_per_1k_usd) + ' at ' + pct(C.airdrop_share) + ' of implied value']
+      factor('No-token clock', r.clock_factor.toFixed(3) + '×', bk.label + ': ' + pct(1 - bk.share_token) + ' of that age still record none'),
+      factor('Implied value', usd(r.implied_value_usd), usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd) + ' band', true)
     ];
     return '<div class="crumb"><a href="#tab=board">← Back to the board</a>' +
       '<h2>#' + r.rank + ' ' + esc(r.name) + (r.watchlist ? '<span class="badge">watchlist</span>' : '') + '</h2>' +
-      '<span class="muted">' + sub(r) + ' · ' + esc(r.family_label) + ' · records no token</span></div>' +
-      '<div class="walk">' + walk.slice(0, 4).join('<div class="op">×</div>') + '<div class="op">=</div>' + walk[4] + '</div>' +
+      '<span class="muted">' + sub(r) + ' · ' + esc(R.family_labels[r.family]) + ' · records no token</span></div>' +
+      '<div class="walk">' + walk.slice(0, 5).join('<div class="op">×</div>') + '<div class="op">=</div>' + walk[5] + '</div>' +
       '<div class="cols"><div>' +
       '<h3>What it is worth, and on what evidence</h3><div class="card">' +
-      kv.map((o) => '<div class="kv"><span>' + o[0] + '</span><b>' + o[1] + '</b></div>').join('') + '</div>' +
-      '<h3>Nearest live-token comps</h3><table><thead><tr><th>Token</th><th class="num">TVL</th>' +
-      '<th class="num">Market cap</th><th class="num">mcap / TVL</th></tr></thead><tbody>' +
-      peers.map(function (p) {
-        return '<tr><td><span class="pname">' + esc(p.name) + '</span><span class="psub">' + esc(p.category || 'no category') + '</span></td>' +
-          num(usd(p.tvl_usd)) + num(usd(p.mcap_usd)) + num(mult(p.ratio)) + '</tr>';
-      }).join('') + '</tbody></table>' +
+      [['Implied value', usd(r.implied_value_usd)],
+       ['Band, P10–P90 of the model\'s misses', usd(r.implied_low_usd) + ' – ' + usd(r.implied_high_usd)],
+       ['Rank over ' + C.boot_refits + ' refits', '#' + r.rank + ' (' + r.rank_lo + '–' + r.rank_hi + ')'],
+       ['Comps in category / family', nc + ' / ' + r.comps_in_family],
+       ['Confidence', r.confidence],
+       ['Expected drop on ' + usd(f.deposit_usd), dollars(r.drop_usd) + ' at ' + pct(C.airdrop_share) + ' of value']
+      ].map((o) => '<div class="kv"><span>' + o[0] + '</span><b>' + o[1] + '</b></div>').join('') + '</div>' +
+      '<h3>Its nearest comps, and what the curve charges them</h3>' +
+      tbl(['Token', 'TVL', 'Market cap', 'mcap / TVL', 'Curve', 'Miss'], M.peersFor(R, r, 5).map(function (p) {
+        return ['<span class="pname">' + esc(p.name) + '</span><span class="psub">' + esc(p.category || 'no category') +
+          '</span>', usd(p.tvl_usd), usd(p.mcap_usd), mult(p.ratio), usd(p.curve_usd), p.miss_x + '×'];
+      })) +
       (r.flags.length ? '<h3>Data flags</h3><ul class="flags">' + r.flags.map((x) => '<li>' + esc(x) + '</li>').join('') + '</ul>' : '') +
-      '<p class="note">It <b>records</b> no token: this snapshot holds no CoinGecko id, ticker or market cap for it. The ' +
-      'implied value is what the comps above say a protocol of this category and size is worth — not a price — and the farm ' +
-      'plan estimates cost and time, not advice.</p>' +
+      '<p class="note">It <b>records</b> no token: no id, ticker or market cap here. The implied value is a comps ' +
+      'estimate, not a price, and none of it is advice.</p>' +
       '</div><div class="wide">' +
-      '<h3>Farm plan · ' + (f.chain ? esc(f.chain) : 'no chain named') + ' · ' + usd(f.deposit_usd) + ' held ' + f.hold_days + ' days</h3>' +
-      '<div class="sum"><div><span>Total cost</span><b>' + esc(f.total_cost) + '</b></div>' +
-      '<div><span>Total time</span><b>' + esc(f.total_time) + '</b></div>' +
-      '<div><span>Expected airdrop on it</span><b>' + dollars(f.ev_usd) + ' — an estimate from the stated assumptions, not a promise</b></div></div>' +
+      '<h3>Farm plan · ' + (f.chain ? esc(f.chain) : 'no chain named') + ' · ' + usd(f.deposit_usd) + ' held ' +
+      f.hold_days + ' days · <b class="conf ' + r.verdict + '">' + r.verdict + '</b></h3>' +
+      '<div class="sum"><div><span>Expected drop</span><b>' + dollars(r.drop_usd) + ' — an estimate from the stated assumptions, not a promise</b></div>' +
+      '<div><span>Costs</span><b>' + dollars(f.fees_usd) + ' of gas and fees + ' + dollars(f.opportunity_usd) + ' of yield given up at ' + pct(C.tbill_apy) + '</b></div>' +
+      '<div><span>Net, per hands-on hour</span><b>' + dollars(r.net_usd) + ' over ' + r.hands_on_hours + ' h — ' + dollars(r.net_per_hour_usd) + ' an hour</b></div></div>' +
       '<table class="plan"><thead><tr><th>Step</th><th>Cost</th><th>Time</th></tr></thead><tbody>' +
       f.steps.map(function (s, i) {
         return '<tr><td class="step"><span class="n">' + (i + 1) + '</span>' + esc(s.action) + '</td>' +
@@ -295,66 +298,53 @@
 
   /* --- model & method --- */
 
-  function statRow(label, s, best) {
-    return '<tr' + (best ? ' class="best"' : '') + '><td>' + label + '</td>' + num(s.median_x.toFixed(2) + '×') +
-      num(pct(s.within_3x)) + num(s.spearman.toFixed(3)) + '</tr>';
-  }
-
-  // The Model tab prints the constants out of model.js itself, so the page cannot quote a number the
-  // model does not use: change a constant there and this table, the board and board.json all move.
-  function constantRows() {
-    return [
-      ['Peer multiple', 'median log10(mcap / TVL) of the ' + R.comps.n + ' live tokens, winsorized ' + (C.winsor_lo * 100) +
-        '–' + (C.winsor_hi * 100) + 'th, shrunk category → family → market with k = ' + C.shrink_k + ', tilted ' +
-        R.comps.size_beta.toFixed(3) + ' per decade of TVL about ' + usd(R.comps.size_pivot_usd) + '; half the bucket\'s ' +
-        'IQR either way is the band', mult(R.comps.global_multiple) + ' market-wide'],
-      ['Momentum', '(1 + clamp(7d, ' + C.growth_floor + ', +' + C.growth_cap + ')/100) ^ ' + C.growth_power +
-        ' — one week of TVL is noise as much as signal', '0.77× to 1.26×'],
-      ['No-token runway', C.runway_floor + ' + ' + C.runway_range + ' × min(age, ' + C.runway_days + ' d)/' + C.runway_days +
-        ' — a long run with no token is accrued points and survivorship; a missing date counts ' + C.unknown_age_days + ' d',
-        C.runway_floor + '× to 1.2×'],
-      ['Farm assumptions', pct(C.airdrop_share) + ' of implied value to an airdrop split by deposit share, positions never ' +
-        'above 0.01% of TVL, gas priced on the cheapest chain it runs on', '$' + C.deposit_usd.toLocaleString('en-US') + ' deposit']
-    ].map(function (o) {
-      return '<tr><td><b>' + o[0] + '</b><span class="psub">' + o[1] + '</span></td>' + num(o[2]) + '</tr>';
-    }).join('');
+  // The Model tab prints what model.js computed: the fitted curve, the shrunk offsets, the clock's
+  // own bucket counts, the ablation. Change a constant there and every number here moves.
+  function tbl(hd, rows) {
+    return '<table><thead><tr>' + hd.map((h, i) => '<th' + (i ? ' class="num"' : '') + '>' + h + '</th>').join('') +
+      '</tr></thead><tbody>' + rows.map((r) => '<tr><td>' + r[0] + '</td>' + r.slice(1).map(num).join('') + '</tr>').join('') +
+      '</tbody></table>';
   }
 
   function modelTab() {
+    var own = R.categories.filter((c) => c.own);
     return '<div class="cols"><div>' +
-      '<h3>The formula</h3><div class="formula-box"><code>implied value = TVL × peer multiple × momentum × no-token runway</code></div>' +
-      '<p class="note">No protocol is named anywhere in the model: the rules see category strings, chain names, TVL, the ' +
-      '7-day change and the listing date. ' + esc(R.model_version) + ', fitted on this snapshot\'s own ' + R.comps.n +
-      ' live tokens — no outside data, no clock.</p>' +
-      '<table><tbody>' + constantRows() + '</tbody></table>' +
-      '<p class="note"><b>“Records no token” is not “has no token”.</b> It means this snapshot holds no CoinGecko id, no ' +
-      'ticker and no market cap for the protocol. It is not a claim that a token is coming, and nothing here is advice.</p>' +
+      '<h3>The formula</h3><div class="formula-box"><code>log10 V = ' + R.fit.a + ' + ' + R.fit.b +
+      ' × log10(TVL / $100M) + family offset + momentum + no-token clock</code></div>' +
+      '<p class="note"><code>fitCurve()</code>, a Huber regression on this snapshot\'s own ' + R.fit.n + ' clean comps: ' +
+      '$100M of TVL prices at ' + usd(R.fit.pivot_value_usd) + ', and at a slope of ' + R.fit.b + ' ten times the TVL buys ' +
+      Math.pow(10, R.fit.b).toFixed(1) + '× the market cap, not ten. No protocol is named: it reads categories, chains, ' +
+      'TVL, the change and the listing date.</p>' +
+      '<h3>Family offsets, shrunk with k = ' + C.shrink_k + '</h3>' +
+      tbl(['Family', 'Comps', 'Raw', 'Shrunk', 'Factor', 'Board rows'], R.families.map(function (f) {
+        return [esc(f.label), f.n, f.raw === null ? '—' : f.raw.toFixed(3), f.offset.toFixed(3), mult(f.factor), f.rows];
+      })) +
+      '<p class="note">A category prices itself only with ' + C.min_cat_comps + ' comps or more (' +
+      esc(own.map((c) => c.category + ' ' + c.n).join(', ')) + '); the rest take their family\'s.</p>' +
+      '<h3>The no-token clock, fitted</h3>' +
+      tbl(['Age', 'Protocols', 'With a token', 'Still none', 'Factor'], R.clock.map(function (c) {
+        return [esc(c.label), c.n, pct(c.share_token || 0), pct(1 - (c.share_token || 0)), mult(c.factor)];
+      })) +
+      '<p class="note">Over every protocol the snapshot keeps at $5M or more that no rule sets aside: one still tokenless ' +
+      'after years is in a shrinking minority, so the clock discounts it. <b>“Records no token” is not “has no token”</b> ' +
+      '— no id, ticker or market cap here, and no claim one is coming.</p>' +
       '</div><div>' +
-      '<h3>Backtest: leave one out over the ' + BT.model.n + ' live tokens</h3>' +
-      '<p class="note">Each market cap predicted from its own TVL, category, 7-day change and age, the comps refitted ' +
-      'without it — the four numbers the board has on a protocol whose token does not exist yet.</p>' +
-      '<table><thead><tr><th>Series</th><th class="num">Median error</th><th class="num">Within 3×</th>' +
-      '<th class="num">Spearman</th></tr></thead><tbody>' +
-      statRow('<b>' + esc(R.model_version) + '</b> — what the board runs', BT.model, true) +
-      statRow('The same comps without the size tilt', BT.no_size) +
-      statRow('Naive baseline: global median multiple × TVL', BT.naive) +
-      '</tbody></table>' +
-      '<p class="note">The size tilt buys the error (' + BT.no_size.median_x.toFixed(2) + '× → ' + BT.model.median_x.toFixed(2) +
-      '×) and costs a little rank order (ρ ' + BT.no_size.spearman.toFixed(3) + ' → ' + BT.model.spearman.toFixed(3) + '). A live ' +
-      'token\'s market cap is not what a pre-token protocol\'s would be, so this measures the model\'s reach and no more — ' +
-      'which is why the baseline is printed beside it.</p>' +
-      '<h3>Fitted multiples by family</h3>' +
-      '<table><thead><tr><th>Family</th><th class="num">Comps</th><th class="num">Median</th><th class="num">Shrunk</th>' +
-      '<th class="num">Band</th><th class="num">Board rows</th></tr></thead><tbody>' +
-      R.families.map(function (f) {
-        return '<tr><td>' + esc(f.label) + '</td>' + num(f.n) +
-          num(f.median === null ? '<span class="muted">—</span>' : mult(f.median)) + num(mult(f.shrunk)) +
-          num(mult(f.low) + ' – ' + mult(f.high)) + num(f.board_rows) + '</tr>';
-      }).join('') +
-      '<tr class="best"><td>Whole market</td>' + num(R.comps.n) + num(mult(R.comps.global_median)) +
-      num(mult(R.comps.global_multiple)) + num(mult(R.comps.winsor_low) + ' – ' + mult(R.comps.winsor_high)) +
-      num(K.board_size) + '</tr>' +
-      '</tbody></table></div></div>';
+      '<h3>Out of sample: every term, one at a time</h3>' +
+      tbl(['Model', 'LOO miss', 'Within 3×', 'Rank corr', 'Time split'], R.ablation.map(function (a) {
+        return [esc(a.term), a.loo.median_x.toFixed(2) + '×', pct(a.loo.within_3x), a.loo.spearman.toFixed(3),
+          a.split ? a.split.median_x.toFixed(2) + '×' : '—'];
+      })) +
+      '<p class="note">Leave-one-out over the ' + AB.loo.n + ' comps, each predicted with the fit refitted without it; ' +
+      'the split fits on the ' + R.split.n_fit + ' listed before ' + esc(R.split.cut) + ' and tests on the ' +
+      R.split.n_test + ' newer. Honestly: the offsets pay leave-one-out and cost a little in the split; momentum and the ' +
+      'clock run at half strength, because at full strength both are worse on both tests.</p>' +
+      '<h3>What the verdicts assume</h3>' +
+      tbl(['Assumption', ''], [
+        ['Airdrop', pct(C.airdrop_share) + ' of implied value by deposit share, on ' + usd(C.deposit_usd)],
+        ['Costs', 'the plan\'s own gas and fees, plus ' + pct(C.tbill_apy) + ' a year of T-bill yield'],
+        ['Verdict', 'FARM over ' + C.farm_ratio + '× its costs, MARGINAL if it nets, else SKIP']
+      ]) +
+      '</div></div>';
   }
 
   /* --- the page --- */
@@ -376,22 +366,26 @@
       '<div class="top"><div><h1>Token Launch <em>Radar</em></h1>' +
       '<p class="meta">' + K.board_size + ' protocols that record no token, ranked by implied value · snapshot ' +
       esc(R.as_of) + ' from ' + esc(String(R.source).split(' ')[0].replace(/^.*\/\//, '')) + ' · model ' + esc(R.model_version) + '</p></div>' +
-      '<div class="formula"><b>TVL × peer multiple × momentum × no-token runway</b>' +
-      'multiples fitted on this snapshot\'s own ' + R.comps.n + ' live tokens</div></div>' +
-      (open ? '' : '<div class="kpis">' +
-      kpi('Watchlist covered', K.watchlist_covered + '/' + K.watchlist_size, 'every slug ranked, rules or not') +
-      kpi('Pre-token rows ranked', String(K.board_size), K.early_size + ' below the ' + usd(R.floor_usd) + ' floor') +
-      kpi('Live comps used', String(K.live_size), 'market median ' + mult(R.comps.global_multiple) + ' of TVL', true) +
-      kpi('Backtest median error', BT.model.median_x.toFixed(2) + '×', 'naive baseline ' + BT.naive.median_x.toFixed(2) + '×') +
-      kpi('Within 3× / Spearman', pct(BT.model.within_3x) + ' / ' + BT.model.spearman.toFixed(3), 'naive ' + pct(BT.naive.within_3x) + ' / ' + BT.naive.spearman.toFixed(3)) +
-      kpi('Total implied value', usd(K.implied_total_usd), 'sum of the board, bands aside') + '</div>') +
+      '<div class="formula"><b>TVL × size curve × family offset × momentum × no-token clock</b>' +
+      'fitted on this snapshot\'s own ' + R.fit.n + ' clean comps</div></div>' +
+      (open ? '' : '<div class="badge-row"><span class="seal ' + (CHECK.match ? 'ok' : 'bad') + '">' +
+      (CHECK.match ? '✓' : '✗') + ' board.json = this page: ' + CHECK.n + '/' + CHECK.of +
+      ' ranks, values and verdicts match · seal ' + esc(R.seal) + '</span></div>' +
+      '<div class="kpis">' + [
+        ['Watchlist covered', K.watchlist_covered + '/' + K.watchlist_size, 'every slug ranked, rules or not'],
+        ['Pre-token rows ranked', String(K.board_size), K.early_size + ' under the ' + usd(R.floor_usd) + ' floor'],
+        ['Clean comps fitted', String(K.comps_size), 'one row per token, of ' + K.comp_rows + ' live rows', 1],
+        ['Out-of-sample miss', AB.loo.median_x.toFixed(2) + '×', 'a flat multiple misses ' + FLAT.loo.median_x.toFixed(2) + '×'],
+        ['Verdicts on ' + usd(C.deposit_usd), K.farm + ' farm', K.marginal + ' marginal · ' + K.skip + ' skip'],
+        ['Total implied value', usd(K.implied_total_usd), 'the board summed, bands aside']
+      ].map((o) => kpi(o[0], o[1], o[2], o[3])).join('') + '</div>') +
       '<div class="tabs">' + Object.keys(TABS).map(function (k) {
         var t = TABS[k];
         return '<button data-tab="' + k + '" class="' + (t.alt ? 'alt' : '') + '" aria-current="' + (S.tab === k) + '">' +
           t.label + (t.n === null ? '' : '<b>' + t.n + '</b>') + '</button>';
       }).join('') + '</div>' + body +
-      '<footer>make.fun token-radar-01 · every number here is recomputed in the browser from the raw snapshot by the ' +
-      'same model.js that wrote board.json · implied value is a comps estimate, not a price, and none of it is advice.</footer>';
+      '<footer>make.fun token-radar-01 · every number is recomputed in the browser from the raw snapshot by the same ' +
+      'model.js that wrote board.json · an implied value is a comps estimate, not a price, and none of it is advice.</footer>';
     root.setAttribute('aria-busy', 'false');
   }
 

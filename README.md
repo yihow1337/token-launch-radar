@@ -16,38 +16,57 @@ comparables, and gives each one a farm plan with costs and times.
 runs the value model in `dashboard/model.js`, and writes:
 
 - `board.json` — every ranked row: slug, name, rank, implied value, the factor walk and the farm steps.
-- `data.js` — `window.RADAR_SNAPSHOT = <the raw snapshot>`. The page recomputes the board in the browser
-  with the same `dashboard/model.js`, so the page and the board can never disagree.
+- `data.js` — `window.RADAR_SNAPSHOT = <the raw snapshot>`, plus the board as `[slug, rank, implied
+  value, verdict]` rows and a 32-bit FNV-1a seal of them. The page recomputes the whole board in the
+  browser with the same `dashboard/model.js` and checks itself against those rows and that seal, and
+  shows the result in a badge — so the page and the board cannot disagree quietly.
 - `dashboard/`, `screenshots/` — copied as they are, then `dossier.json` from `vendor/makefun-board.ts`.
 
 ## The model, in one paragraph
 
-    implied value = TVL x peer multiple x momentum x no-token runway
+    log10 V = a + b x log10(TVL / $100M) + family/category offset + momentum + no-token clock
 
-The peer multiple is the median of `log10(mcap / TVL)` over the snapshot's *own* 128 live-token
-protocols, winsorized at the 5th and 95th percentile and shrunk category to family to whole market
-(k = 3), times a fitted size tilt of -0.26 per decade of TVL about a $32.6M pivot — the small live
-tokens here trade near 0.7x TVL and the large ones near 0.04x — clamped to 0.02-3.0x, with half the
-bucket's IQR either way as the low-high band. Momentum is a damped 7-day TVL change,
-`(1 + clamp(g, -40, +60)/100) ^ 0.5`; runway is `0.8 + 0.4 x min(age, 1095)/1095`, so a protocol that
-has run for years while recording no token scores above one listed last month. Leave one out over the
-live tokens — each market cap predicted from its own TVL, category, 7-day change and age, the comps
-refitted without it — gives a median error of 3.82x, 43.0% within 3x and Spearman 0.396, against a
-naive global-median baseline of 5.07x, 35.2% and 0.416. No protocol is ever named in the code: the
-rules read category strings, chain names, TVL, the 7-day change and the listing date, and nothing else.
+Everything in it is fitted on the snapshot's own comparables and measured out of sample by the same
+file. The comps are cleaned first — one row per token (TVL summed over its group, market cap taken
+once), every wrapper, bridge, versioned release and exchange product dropped — which leaves 88 of the
+128 live-token rows. A Huber regression of `log10(market cap)` on `log10(TVL)` over those 88 gives
+`a = 7.1247, b = 0.4369`: $100M of TVL prices at $13.3M, and because the slope is not 1, ten times the
+TVL buys 2.7x the market cap, so the multiple falls with size. Each family's median residual is shrunk
+toward zero with `k = 8` and clamped to ±0.6 dex, and a category earns an offset of its own only with
+three comps or more, so one lonely comp cannot price a whole category. Momentum is a damped 7-day TVL
+change, `(1 + clamp(g, -40, +60)/100) ^ 0.5`. The no-token clock is fitted from the snapshot itself:
+the share of protocols of each age that still record no token falls from 74% under 180 days to 14%
+past three years, so a protocol tokenless that long sits in a shrinking minority and the clock
+discounts it — at half strength, because undamped it is worse out of sample.
 
-"Records no token" is what the snapshot says, not a promise that a token is coming, and none of this
-is advice.
+Every term is added one at a time and scored twice: leave-one-out over the comps, and a split in time
+that fits on the comps listed before the median listing date and tests on the newer half. A flat
+multiple misses by 4.90x; the size curve takes that to 3.24x, the offsets to 3.09x, momentum to 3.05x
+and the clock to 2.99x, with 50.0% of comps within 3x. The offsets pay leave-one-out and cost a little
+in the split (2.50x to 2.76x), where only 33 comps are left to fit on; that is in the table on the
+page too. Every row carries a P10–P90 value band from those leave-one-out residuals and a P10–P90 rank
+range over 40 refits of the whole fit on comps resampled with a seeded PRNG.
+
+Each row also gets a farm plan whose seven steps carry a dollar cost and an hour count, summed into a
+total, netted against the airdrop it would expect — 7.5% of implied value, split by deposit share, on
+a $1,000 deposit never larger than 0.01% of TVL — and against the 4.5% a year that deposit gives up in
+T-bills. `FARM` when the drop covers its costs twice over, `MARGINAL` when it merely nets positive,
+`SKIP` otherwise: 72, 50 and 75 of the 197 rows. The biggest implied values are mostly `SKIP`, because
+$1,000 of a $2.7B protocol earns a drop smaller than the gas and the yield it gives up.
+
+No protocol is ever named in the code: the rules read category strings, chain names, TVL, the 7-day
+change and the listing date, and nothing else. "Records no token" is what the snapshot says, not a
+promise that a token is coming, and none of this is advice.
 
 ## The page
 
 `dashboard/` is four files and no framework: `index.html`, `app.css`, `app.js` and `model.js`, all
 classic scripts that run from `file://` with no network. It recomputes the whole radar in the browser
 from the raw snapshot, so the screen, `board.json` and the screenshots cannot drift apart. Four tabs —
-the pre-token board, the live tokens it is priced off, the protocols set aside with their reason, and
-the model with its backtest — a search, family chips, chain, watchlist and TVL filters, every numeric
+the pre-token board, the live comps it is priced off, the protocols set aside with their reason, and
+the model with its ablation — a search, family chips, chain, watchlist and TVL filters, every numeric
 column sortable, and a detail view per protocol with the value walk, the nearest comps and the farm
-plan. All of it is URL-hash state, e.g. `#tab=board&p=<slug>&fam=vaults&w=watch&sort=ev&dir=desc`,
+plan. All of it is URL-hash state, e.g. `#tab=board&p=<slug>&fam=vaults&w=watch&sort=net&dir=desc`,
 which is how `tools/shoot.sh` photographs the three views in `screenshots/`.
 
 ## Run it
